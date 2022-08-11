@@ -20,7 +20,9 @@ class WienerFilter(nn.Module):
         filter_size (int): Size of each filter in the group
         '''
         super(WienerFilter, self).__init__()
-
+        
+        self.function = Wiener()
+        
         self.alpha = torch.FloatTensor([0.0])
         self.alpha = self.alpha.unsqueeze(-1)
         self.alpha = nn.Parameter(self.alpha)
@@ -48,8 +50,8 @@ class WienerFilter(nn.Module):
         g_ker = F.normalize(g_ker.reshape(g_ker.shape[0], -1), dim=1, p=1)
         g_ker = g_ker.reshape(nf, nc, nx, ny)
 
-        output = Wiener().apply(y, ker, g_ker, self.alpha)
-        output = output.squeeze(1)
+        output = self.function.apply(y, ker, g_ker, self.alpha)
+        output = output[0]
         return output
 
 class WienerFilterKPN(nn.Module):

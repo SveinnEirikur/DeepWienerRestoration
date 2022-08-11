@@ -21,7 +21,7 @@ class Wiener(torch.autograd.Function):
         blurKernel: (torch.(cuda.)Tensor) PSFs tensor of size B x C x Hk x Wk
         weights: (torch.(cuda.)Tensor) Regularization kernels of size D x C x Hw x Ww
         alpha: (float) Regularization parameter of shape 1 x 1
-        returns: (torch.(cuda.)Tensor) Wiener filter output tensor B x 1 x C x H x H
+        returns: (torch.(cuda.)Tensor) Wiener filter output tensor B x 1 x C x H x W
 
         output = F^H (B^H*F(input)/(|B|^2+exp(alpha)*|W|^2))
         """
@@ -65,7 +65,7 @@ class Wiener(torch.autograd.Function):
         bs = (0, 0) + bs
         B = utils.shift(B, bs, bc='circular')
         # FFT of B
-        B = torch.rfft(B, 2) 
+        B = torch.fft.rfft2(B) 
 
         # Zero-padding of the spatial dimensions of the weights to match the input size
         G = torch.zeros(wshape[0], wshape[1], wshape[2], input.size(2), input.size(3)).type_as(weights)
@@ -76,23 +76,26 @@ class Wiener(torch.autograd.Function):
         ws = (0, 0, 0) + ws
         G = utils.shift(G, ws, bc='circular')
         # FFT of G
-        G = torch.rfft(G, 2) 
+        G = torch.fft.rfft2(G)
 
-        Y = cmul(conj(B), torch.rfft(input, 2)).unsqueeze(1) 
+        Y = torch.mul(B.conj(), torch.fft.rfft2(input)).unsqueeze(1) 
 
         ctx.intermediate_results = tuple()
         if ctx.needs_input_grad[2] or ctx.needs_input_grad[3]:
             ctx.intermediate_results += (alpha, B, G, Y, wshape)
         elif ctx.needs_input_grad[0]:
             ctx.intermediate_results += (alpha, B, G)
-
-        B = cabs(B).unsqueeze(-1) 
-        G = cabs(G).pow(2).sum(dim=1)  
-
+        
+        B = B.abs().unsqueeze(-1) 
+        G = G.abs().pow(2).sum(dim=1)  
+        
         G = G.mul(alpha.unsqueeze(-1).unsqueeze(-1)).unsqueeze(0).unsqueeze(-1) 
 
         G = G + B.pow(2).unsqueeze(1) 
-        return torch.irfft(Y.div(G), 2, signal_sizes=input.shape[-2:])
+        
+        G = G.squeeze(-1)
+        
+        return torch.fft.irfft2(Y.div(G), input.shape[-2:])
 
     @staticmethod
     def backward(ctx, grad_output, grad_c=None):
@@ -106,44 +109,46 @@ class Wiener(torch.autograd.Function):
         grad_input = grad_weights = grad_alpha = None
 
         if ctx.needs_input_grad[0] or ctx.needs_input_grad[2] or ctx.needs_input_grad[3]:
-            D = cabs(B).pow(2).unsqueeze(1)  
-            T = cabs(G).pow(2).sum(dim=1).unsqueeze(0) 
+            D = B.abs().pow(2).unsqueeze(1)  
+            T = G.abs().pow(2).sum(dim=1).unsqueeze(0) 
             T = T.mul(alpha.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)) 
             D = D + T
             del T
             D = D.unsqueeze(-1) 
 
         if ctx.needs_input_grad[0] or ctx.needs_input_grad[2]:
-            Z = torch.rfft(grad_output, 2) 
+            Z = torch.fft.rfft2(grad_output) 
 
         if ctx.needs_input_grad[0]:
-            grad_input = torch.irfft(cmul(B.unsqueeze(1), Z).div(D), 2, \
-                                  signal_sizes=grad_output.shape[-2:])
+            grad_input = torch.fft.irfft2(torch.mul(B.unsqueeze(1), Z).div(D),
+                                          grad_output.shape[-2:])
             grad_input = grad_input.sum(dim=1)
 
         if 'B' in locals(): del B
         if ctx.needs_input_grad[2]:
-            ws = tuple(int(i) for i in -(np.asarray(wshape[-2:]) // 2))
+            ws = tuple(int(i) for i in (np.asarray(wshape[-2:]) // 2))
             ws = (0, 0, 0, 0) + ws
-            U = cmul(conj(Z), Y.div(D.pow(2))) 
-            U = U[..., 0].unsqueeze(-1).unsqueeze(2) 
-            U = U.mul(G.unsqueeze(0))  
-            U = torch.irfft(U, 2, signal_sizes=grad_output.shape[-2:])  
-            U = utils.shift_transpose(U, ws, bc='circular')
-            U = U[..., 0:wshape[3], 0:wshape[4]]  
+            U = cmul(conj(torch.view_as_real(Z)), torch.view_as_real(Y).div(D.pow(2))) 
+            U = U[..., 0].unsqueeze(-1) 
+            U = U.mul(torch.view_as_real(G.unsqueeze(0)))  
+            U = torch.fft.irfft2(U,grad_output.shape[-2:])
+            U = utils.shift(U, ws, bc='circular')
+            U = U[..., 0:wshape[3], 0:wshape[4]]
+            U = U.squeeze(0)
             grad_weights = -2 * U.mul(alpha.unsqueeze(0).unsqueeze(2).unsqueeze(-1).unsqueeze(-1))
             del U
             grad_weights = grad_weights.sum(dim=0)
             if wshape[2] == 1:
-                grad_weights = grad_weights.sum(dim=2, keepdim=True)
+                grad_weights = grad_weights.sum(dim=2)
             if wshape[0] == 1 and alpha.size(0) != 1:
                 grad_weights = grad_weights.sum(dim=0)
 
         if 'Z' in locals(): del Z
         if ctx.needs_input_grad[3]:
-            Y = Y.mul(cabs(G).pow(2).sum(dim=1).unsqueeze(0).unsqueeze(-1)) 
+            Y = Y.unsqueeze(-1)
+            Y = Y.mul(G.abs().pow(2).sum(dim=1).unsqueeze(0).unsqueeze(-1)) 
             Y = Y.div(D.pow(2))
-            Y = torch.irfft(Y, 2, signal_sizes=grad_output.shape[-2:])
+            Y = torch.fft.irfft2(Y, grad_output.shape[-2:])
             Y = Y.mul(-alpha.unsqueeze(0).unsqueeze(-1).unsqueeze(-1))
             Y = Y.mul(grad_output)
             grad_alpha = Y.sum(dim=4).sum(dim=3).sum(dim=0)
@@ -199,4 +204,3 @@ class WienerUNet(torch.nn.Module):
         out = x - self.lamb * brackets
 
         return out
-   

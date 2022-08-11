@@ -718,16 +718,16 @@ def psf2otf(psf,otfSize):
     s = tuple(int(i) for i in -(np.asarray(psf.shape[0:])//2))
     s = (0,)*(len(otfSize)-2)+s
     otf = shift(otf,s,bc='circular')
-    otf = torch.rfft(otf,2)
+    otf = torch.fft.rfft2(otf)
 
     return otf
-               
+
 def imfilter_transpose2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
 
-    assert(mode in ("conv","corr")), "Valid filtering modes are"\
-    +" 'conv' and 'corr'."
-    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType"\
-    +" values are 'periodic'|'symmetric'|'zero'|'valid'."
+    assert(mode in ("conv","corr")), "Valid filtering modes are" \
+                                     +" 'conv' and 'corr'."
+    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType" \
+                                                                +" values are 'periodic'|'symmetric'|'zero'|'valid'."
 
     assert(input.dim() < 5),"The input must be at most a 4D tensor."
 
@@ -738,8 +738,8 @@ def imfilter_transpose2D_SpatialDomain(input,kernel,padType="symmetric",mode="co
         kernel = kernel.unsqueeze(0)
 
     channels = input.size(1)
-    assert(kernel.size(1) == 1 or kernel.size(1) == channels),"Invalid "\
-    +"filtering kernel dimensions."
+    assert(kernel.size(1) == 1 or kernel.size(1) == channels),"Invalid " \
+                                                              +"filtering kernel dimensions."
 
     if kernel.shape[1] == 1 and input.shape[1] != kernel.shape[1]:
         kernel = torch.cat([kernel]*input.shape[1], dim=1)
@@ -769,10 +769,10 @@ def imfilter2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
     kernel.Otherwise, if kernel has a single channel each channel of the input
     is filtered by the same channel of the kernel."""
 
-    assert(mode in ("conv","corr")), "Valid filtering modes are"\
-    +" 'conv' and 'corr'."
-    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType"\
-    +" values are 'periodic'|'symmetric'|'zero'|'valid'."
+    assert(mode in ("conv","corr")), "Valid filtering modes are" \
+                                     +" 'conv' and 'corr'."
+    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType" \
+                                                                +" values are 'periodic'|'symmetric'|'zero'|'valid'."
 
     assert(input.dim() < 5),"The input must be at most a 4D tensor."
 
@@ -783,7 +783,7 @@ def imfilter2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
         kernel = kernel.unsqueeze(0)
 
     channels = input.size(1)
-    
+
     if kernel.shape[1] == 1 and input.shape[1] != kernel.shape[1]:
         kernel = torch.cat([kernel]*input.shape[1], dim=1)
     if mode == "conv":
@@ -804,7 +804,7 @@ def imfilter2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
     out = torch.conv2d(input, kernel, groups=kernel.shape[0])
     out = out[0].reshape(b, c, out.shape[2], out.shape[3])
 
-    return out       
+    return out
 
 def odctdict(n,L,dtype = 'f',GPU = False):
     D = torch.zeros(n,L)
@@ -962,7 +962,7 @@ def calc_psnr(inp, other):
 
     for i in range(other.shape[0]):
         peakVal = other[i].max()
-        MSE = (inp[i] - other[i]).view(-1).pow(2).mean(dim=0)
+        MSE = (inp[i] - other[i]).reshape(-1).pow(2).mean(dim=0)
 
         SNR = 10 * torch.log10(peakVal ** 2 / MSE)
         PSNR.append(SNR.detach().cpu().numpy())
@@ -1097,8 +1097,8 @@ class EdgeTaper(torch.autograd.Function):
             psfProj = psf.sum(dim=1)
             z = torch.zeros(input.size(-2) - 1).type_as(psf)
             z[0:psf.size(0)] = psfProj
-            z = torch.rfft(z, 1, onesided=True)
-            z = torch.irfft(cmul(z, conj(z)), 1, onesided=True, signal_sizes=(input.size(-2) - 1,))
+            z = torch.fft.rfft(z)
+            z = torch.fft.irfft(torch.mul(z, z.conj()), input.size(-2) - 1)
             z = torch.cat((z, z[0:1]), dim=0).div(z.max())
             beta['dim0'] = z.unsqueeze(-1)
 
@@ -1106,8 +1106,8 @@ class EdgeTaper(torch.autograd.Function):
             psfProj = psf.sum(dim=0)
             z = torch.zeros(input.size(-1) - 1).type_as(psf)
             z[0:psf.size(1)] = psfProj
-            z = torch.rfft(z, 1, onesided=True)
-            z = torch.irfft(cmul(z, conj(z)), 1, onesided=True, signal_sizes=(input.size(-1) - 1,))
+            z = torch.fft.rfft(z)
+            z = torch.fft.irfft(torch.mul(z, z.conj()), input.size(-1) - 1)
             z = torch.cat((z, z[0:1]), dim=0).div(z.max())
             beta['dim1'] = z.unsqueeze(0)
 
@@ -1121,8 +1121,7 @@ class EdgeTaper(torch.autograd.Function):
 
         otf = psf2otf(psf, input.shape)
 
-        blurred_input = torch.irfft(cmul(torch.rfft(input, 2), otf), 2, \
-                                 signal_sizes=input.shape[-2:])
+        blurred_input = torch.fft.irfft2(torch.mul(torch.fft.rfft2(input), otf), input.shape[-2:])
 
         output = alpha * input + (1 - alpha) * blurred_input
 
@@ -1139,9 +1138,9 @@ class EdgeTaper(torch.autograd.Function):
 
         grad_input = mask.type_as(grad_output) * grad_output
 
-        grad_input = alpha * grad_input + torch.irfft(cmul(torch.rfft((1 - alpha) \
-                                                   * grad_input, 2), conj(otf)), 2,
-                                                   signal_sizes=grad_input.shape[-2:])
+        grad_input = alpha * grad_input + torch.fft.irfft2(torch.mul(torch.fft.rfft2((1 - alpha) \
+                                                   * grad_input), otf.conj()), 
+                                                          grad_input.shape[-2:])
 
         return grad_input, None
 
