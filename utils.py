@@ -7,6 +7,7 @@ import torch.nn as nn
 import random
 import torch.nn.functional as F
 from networks import UNet
+from einops import rearrange, repeat, asnumpy
 
 
 def gen_dct2_kernel(support,dtype = 'f', GPU = False, nargout = 1):
@@ -722,6 +723,7 @@ def psf2otf(psf,otfSize):
 
     return otf
 
+
 def imfilter_transpose2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
 
     assert(mode in ("conv","corr")), "Valid filtering modes are" \
@@ -755,15 +757,65 @@ def imfilter_transpose2D_SpatialDomain(input,kernel,padType="symmetric",mode="co
     b, c, h, w = input.shape
     input = input.reshape(input.shape[0]*input.shape[1], input.shape[2], input.shape[3])
     input = input[None]
-    kernel = kernel.reshape(kernel.shape[0]*kernel.shape[1], kernel.shape[2], kernel.shape[3])
 
-    kernel = kernel[:,None]
-    out = torch.conv_transpose2d(input, kernel, groups=kernel.shape[0])
+    input = repeat(input, 'b c h w -> b (nc c) h w', nc=kernel.shape[0])
+
+    kernel = rearrange(kernel, 'b c h w -> (c b) 1 h w')
+
+    out = torch.conv_transpose2d(input, kernel, groups=c)
+
     out = out[0].reshape(b, c, out.shape[2], out.shape[3])
     return pad_transpose2D(out,padding,padType)
 
 
 def imfilter2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
+    r"""If the input and the kernel are both multichannel tensors then each
+    channel of the input is filtered by the corresponding channel of the
+    kernel.Otherwise, if kernel has a single channel each channel of the input
+    is filtered by the same channel of the kernel."""
+
+    assert(mode in ("conv","corr")), "Valid filtering modes are" \
+                                     +" 'conv' and 'corr'."
+    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType" \
+                                                                +" values are 'periodic'|'symmetric'|'zero'|'valid'."
+
+    assert(input.dim() < 5),"The input must be at most a 4D tensor."
+
+    while input.dim() <  4:
+        input = input.unsqueeze(0)
+
+    while kernel.dim() < 4:
+        kernel = kernel.unsqueeze(0)
+
+    channels = input.size(1)
+
+    if kernel.shape[1] == 1 and input.shape[1] != kernel.shape[1]:
+        kernel = torch.cat([kernel]*input.shape[1], dim=1)
+    if mode == "conv":
+        kernel = reverse(reverse(kernel,dim=-1),dim=-2)
+
+    if padType == "valid":
+        padding = 0
+    else:
+        padding = getPad2RetainShape(kernel.shape[-2:])
+
+    input = pad2D(input,padding,padType)
+
+    b, c, h, w = input.shape
+    input = input.reshape(input.shape[0]*input.shape[1], input.shape[2], input.shape[3])
+    input = input[None]
+    kernel = rearrange(kernel, 'b c h w -> c b h w')
+
+    input = repeat(input, 'b c h w -> b (c nc) h w', nc=kernel.shape[1])
+
+    out = torch.conv2d(input, kernel, groups=c)
+
+    out = out.reshape(b, c, out.shape[2], out.shape[3])
+
+    return out
+
+
+def imfilter2D_SpatialDomain_old(input,kernel,padType="symmetric",mode="conv"):
     r"""If the input and the kernel are both multichannel tensors then each
     channel of the input is filtered by the corresponding channel of the
     kernel.Otherwise, if kernel has a single channel each channel of the input
@@ -815,7 +867,7 @@ def odctdict(n,L,dtype = 'f',GPU = False):
     
     D[:,0] = 1/math.sqrt(n)
     for k in range(1,L): 
-        v = torch.cos(th.arange(0,n)*math.pi*k/L); 
+        v = torch.cos(torch.arange(0,n)*math.pi*k/L); 
         v -= v.mean();
         D[:,k] = v.div(v.norm(p=2))
     
