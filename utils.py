@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from networks import UNet
 from einops import rearrange, repeat, asnumpy
 
+def dctmtx(n, dtype):
+    D = torch.from_numpy(dct(np.eye(n), norm='ortho', axis=0)).type(dtype)
+    return D
 
 def gen_dct2_kernel(support,dtype = 'f', GPU = False, nargout = 1):
     r"""If two output arguments are returned then:
@@ -556,7 +559,7 @@ def pad_transpose2D(input,pad=0,padType='zero'):
         return input
     
     if padType == 'zero':
-        return crop2D(input,pad)
+        return input[...,pad[0]:pad[1],pad[2]:pad[3]]
     elif padType == 'symmetric':
         return symmetricPad_transpose2D(input,pad)
     elif padType == 'periodic':
@@ -755,16 +758,16 @@ def imfilter_transpose2D_SpatialDomain(input,kernel,padType="symmetric",mode="co
         padding = getPad2RetainShape(kernel.shape[-2:])
 
     b, c, h, w = input.shape
-    input = input.reshape(input.shape[0]*input.shape[1], input.shape[2], input.shape[3])
-    input = input[None]
+    #input = input.reshape(input.shape[0]*input.shape[1], input.shape[2], input.shape[3])
+    #input = input[None]
 
-    input = repeat(input, 'b c h w -> b (nc c) h w', nc=kernel.shape[0])
+    input = repeat(input, 'b c h w -> b (c nk) h w', nk=kernel.shape[0])
 
     kernel = rearrange(kernel, 'b c h w -> (c b) 1 h w')
 
     out = torch.conv_transpose2d(input, kernel, groups=c)
 
-    out = out[0].reshape(b, c, out.shape[2], out.shape[3])
+    out = out.reshape(b, c, out.shape[2], out.shape[3])
     return pad_transpose2D(out,padding,padType)
 
 
@@ -802,11 +805,100 @@ def imfilter2D_SpatialDomain(input,kernel,padType="symmetric",mode="conv"):
     input = pad2D(input,padding,padType)
 
     b, c, h, w = input.shape
-    input = input.reshape(input.shape[0]*input.shape[1], input.shape[2], input.shape[3])
-    input = input[None]
+    #input = input.reshape(input.shape[0]*input.shape[1], input.shape[2], input.shape[3])
+    #input = input[None]
     kernel = rearrange(kernel, 'b c h w -> c b h w')
 
-    input = repeat(input, 'b c h w -> b (c nc) h w', nc=kernel.shape[1])
+    input = repeat(input, 'b c h w -> b (c nk) h w', nk=kernel.shape[1])
+
+    out = torch.conv2d(input, kernel, groups=c)
+
+    out = out.reshape(b, c, out.shape[2], out.shape[3])
+
+    return out
+
+
+def imfilter_transpose2D_MultiBand(input,kernel,padType="symmetric",mode="conv"):
+
+    assert(mode in ("conv","corr")), "Valid filtering modes are" \
+                                     +" 'conv' and 'corr'."
+    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType" \
+                                                                +" values are 'periodic'|'symmetric'|'zero'|'valid'."
+
+    assert(input.dim() < 5),"The input must be at most a 4D tensor."
+
+    while input.dim() <  4:
+        input = input.unsqueeze(0)
+
+    while kernel.dim() < 4:
+        kernel = kernel.unsqueeze(0)
+
+    channels = input.size(1)
+    assert(kernel.size(1) == 1 or kernel.size(1) == channels),"Invalid " \
+                                                              +"filtering kernel dimensions."
+
+    if kernel.shape[1] == 1 and input.shape[1] != kernel.shape[1]:
+        kernel = torch.cat([kernel]*input.shape[1], dim=1)
+
+    if mode == "conv":
+        kernel = reverse(reverse(kernel,dim=-1),dim=-2)
+
+    if padType == "valid":
+        padding = 0
+    else:
+        padding = getPad2RetainShape(kernel.shape[-2:])
+
+    b, c, h, w = input.shape
+    #input = rearrange(input, 'b c h w -> 1 (b c) h w')
+    input = repeat(input, 'b c h w -> b (nk c) h w', nk=kernel.shape[0])
+
+    kernel = rearrange(kernel, 'b c h w -> (c b) 1 h w')
+    kernel = repeat(kernel, 'cb 1 h w -> cb (nb 1) h w', nb=b)
+
+    out = torch.conv_transpose2d(input, kernel, groups=c)
+
+    out = out[0].reshape(b, c, out.shape[2], out.shape[3])
+    return pad_transpose2D(out,padding,padType)
+
+
+def imfilter2D_MultiBand(input,kernel,padType="symmetric",mode="conv"):
+    r"""If the input and the kernel are both multichannel tensors then each
+    channel of the input is filtered by the corresponding channel of the
+    kernel.Otherwise, if kernel has a single channel each channel of the input
+    is filtered by the same channel of the kernel."""
+
+    assert(mode in ("conv","corr")), "Valid filtering modes are" \
+                                     +" 'conv' and 'corr'."
+    assert(padType in ("periodic","symmetric","zero","valid")), "Valid padType" \
+                                                                +" values are 'periodic'|'symmetric'|'zero'|'valid'."
+
+    assert(input.dim() < 5),"The input must be at most a 4D tensor."
+
+    while input.dim() <  4:
+        input = input.unsqueeze(0)
+
+    while kernel.dim() < 4:
+        kernel = kernel.unsqueeze(0)
+
+    channels = input.size(1)
+
+    if kernel.shape[1] == 1 and input.shape[1] != kernel.shape[1]:
+        kernel = torch.cat([kernel]*input.shape[1], dim=1)
+    if mode == "conv":
+        kernel = reverse(reverse(kernel,dim=-1),dim=-2)
+
+    if padType == "valid":
+        padding = 0
+    else:
+        padding = getPad2RetainShape(kernel.shape[-2:])
+
+    input = pad2D(input,padding,padType)
+
+    b, c, h, w = input.shape
+    #input = rearrange(input, 'b c h w -> 1 (b c) h w')
+    input = repeat(input, 'b c h w -> b (nk c) h w', nk=kernel.shape[1])
+
+    kernel = rearrange(kernel, 'b c h w -> c b h w')
 
     out = torch.conv2d(input, kernel, groups=c)
 
